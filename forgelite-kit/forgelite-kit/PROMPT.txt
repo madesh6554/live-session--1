@@ -1,0 +1,3 @@
+Read forgelite-kit/BUILD.md and follow it exactly, phase by phase, until the
+Phase 7 checklist passes. Copy every code block byte-for-byte. Log each
+finished phase to course-sales-log/PROGRESS.md.
