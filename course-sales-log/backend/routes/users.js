@@ -5,12 +5,28 @@ const { requireDashboard } = require('../middleware/requireDashboard');
 
 const router = express.Router();
 
-// Managing accounts is itself a dashboard action. Single role by design: any
-// signed-in user can add or disable others.
+// Managing accounts is itself a dashboard action: any signed-in user can add
+// or disable others, regardless of their own role.
 router.use('/api/users', requireDashboard);
 
 /** Never leak password_hash — it is not selected anywhere in this file. */
-const PUBLIC_COLUMNS = 'id, username, name, active, created_at, last_login_at';
+const PUBLIC_COLUMNS = `u.id, u.username, u.name, u.active, u.created_at, u.last_login_at,
+       u.role_id, r.name as role_name`;
+const FROM_USERS = 'from users u left join roles r on r.id = u.role_id';
+
+async function roleExists(roleId) {
+  if (roleId === null) return true;
+  const { rows } = await db.query('select id from roles where id = $1', [roleId]);
+  return rows.length > 0;
+}
+
+/** role_id: undefined = not touched, null = unassign (unrestricted), a number = assign. */
+function parseRoleId(raw) {
+  if (raw === null) return { value: null };
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return { error: 'Role is invalid' };
+  return { value: n };
+}
 
 // Reject non-strings outright. `String(null)` is "null" and `String(["a"])` is
 // "a", so coercing first would silently accept a JSON null as a real value —
@@ -51,7 +67,7 @@ function validateName(name) {
 router.get('/api/users', async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `select ${PUBLIC_COLUMNS} from users order by active desc, lower(username)`
+      `select ${PUBLIC_COLUMNS} ${FROM_USERS} order by u.active desc, lower(u.username)`
     );
     res.json({ users: rows });
   } catch (err) {
@@ -73,13 +89,24 @@ router.post('/api/users', async (req, res, next) => {
     const pErr = validatePassword(req.body?.password);
     if (pErr) return res.status(400).json({ error: pErr });
 
+    let roleId = null;
+    if (req.body?.role_id !== undefined) {
+      const parsed = parseRoleId(req.body.role_id);
+      if (parsed.error) return res.status(400).json({ error: parsed.error });
+      roleId = parsed.value;
+      if (!(await roleExists(roleId))) return res.status(400).json({ error: 'Unknown role' });
+    }
+
     const hash = await hashPassword(req.body.password);
     const { rows } = await db.query(
-      `insert into users (username, name, password_hash) values ($1,$2,$3)
-       returning ${PUBLIC_COLUMNS}`,
-      [username, String(name).trim(), hash]
+      `insert into users (username, name, password_hash, role_id) values ($1,$2,$3,$4)
+       returning id`,
+      [username, String(name).trim(), hash, roleId]
     );
-    res.status(201).json({ user: rows[0] });
+    const { rows: created } = await db.query(
+      `select ${PUBLIC_COLUMNS} ${FROM_USERS} where u.id = $1`, [rows[0].id]
+    );
+    res.status(201).json({ user: created[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'That username is already taken' });
     next(err);
@@ -118,6 +145,13 @@ router.patch('/api/users/:id', async (req, res, next) => {
       sets.push('password_changed_at = clock_timestamp()');
     }
 
+    if (req.body?.role_id !== undefined) {
+      const parsed = parseRoleId(req.body.role_id);
+      if (parsed.error) return res.status(400).json({ error: parsed.error });
+      if (!(await roleExists(parsed.value))) return res.status(400).json({ error: 'Unknown role' });
+      sets.push(`role_id = ${push(parsed.value)}`);
+    }
+
     const disabling = req.body?.active !== undefined && !req.body.active && existing[0].active;
     if (req.body?.active !== undefined) sets.push(`active = ${push(!!req.body.active)}`);
 
@@ -127,7 +161,7 @@ router.patch('/api/users/:id', async (req, res, next) => {
     // no way back short of editing the database by hand. The check and the
     // update run in one transaction, with the other rows locked, so two
     // concurrent disables cannot both see "one other account still active".
-    const updated = await db.withTransaction(async (client) => {
+    const updatedId = await db.withTransaction(async (client) => {
       if (disabling) {
         const { rows: remaining } = await client.query(
           'select id from users where active = true and id <> $1 for update', [id]
@@ -135,18 +169,21 @@ router.patch('/api/users/:id', async (req, res, next) => {
         if (remaining.length === 0) return null;
       }
       const { rows } = await client.query(
-        `update users set ${sets.join(', ')} where id = $1 returning ${PUBLIC_COLUMNS}`,
+        `update users set ${sets.join(', ')} where id = $1 returning id`,
         params
       );
-      return rows[0];
+      return rows[0]?.id ?? null;
     });
 
-    if (!updated) {
+    if (!updatedId) {
       return res.status(400).json({
         error: 'This is the only active account — add another before disabling it',
       });
     }
-    res.json({ user: updated });
+    const { rows: updated } = await db.query(
+      `select ${PUBLIC_COLUMNS} ${FROM_USERS} where u.id = $1`, [updatedId]
+    );
+    res.json({ user: updated[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'That username is already taken' });
     next(err);

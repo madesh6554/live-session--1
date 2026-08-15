@@ -1,10 +1,10 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import {
-  SlidersHorizontal, GraduationCap, Users, ShieldCheck, Lock,
+  SlidersHorizontal, GraduationCap, Users, ShieldCheck, Lock, Check,
   Sun, Moon, Monitor, Plus, Pencil, Eye, EyeOff, KeyRound, Ban, CircleCheck, UserPlus,
 } from 'lucide-react';
-import { apiGet, apiPost, apiPatch } from '../utils/api';
-import { Card, Button, IconButton, Input, ErrorMsg, Spinner, EmptyState,
+import { apiGet, apiPost, apiPatch, apiFetch } from '../utils/api';
+import { Card, Button, IconButton, Input, Select, ErrorMsg, Spinner, EmptyState,
          useToast, ToastContainer } from '../components/ui';
 import { C, FONT, MONO, T, W, LH, fmtMoney, fmtNum, fmtDateTime } from '../constants';
 import { useTheme } from '../theme';
@@ -18,7 +18,25 @@ const TABS = [
   { key: 'products',    label: 'Products',    Icon: GraduationCap },
   { key: 'salespeople', label: 'Salespeople', Icon: Users },
   { key: 'accounts',    label: 'Accounts',    Icon: ShieldCheck },
+  { key: 'roles',       label: 'Roles',       Icon: Lock },
 ];
+
+/**
+ * The permission vocabulary a role can be built from — PAIRED with
+ * backend/routes/roles.js PAGE_KEYS. Adding a page means adding it here too.
+ */
+const PERMISSION_OPTIONS = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'log', label: 'Sales Log' },
+  { key: 'outstanding', label: 'Outstanding' },
+  { key: 'admin-settings', label: 'Admin Settings (menu)' },
+  { key: 'admin-settings:general', label: 'Settings — General' },
+  { key: 'admin-settings:products', label: 'Settings — Products' },
+  { key: 'admin-settings:salespeople', label: 'Settings — Salespeople' },
+  { key: 'admin-settings:accounts', label: 'Settings — Accounts' },
+  { key: 'admin-settings:roles', label: 'Settings — Roles' },
+];
+const PERMISSION_LABELS = Object.fromEntries(PERMISSION_OPTIONS.map((o) => [o.key, o.label]));
 
 const THEMES = [
   { key: 'light',  label: 'Light',  Icon: Sun },
@@ -146,6 +164,7 @@ export default function AdminSettingsPage({ currentUser }) {
           {tab === 'products' && <ProductManager onToast={push} />}
           {tab === 'salespeople' && <SalespersonManager onToast={push} />}
           {tab === 'accounts' && <UserManager onToast={push} currentUser={currentUser} />}
+          {tab === 'roles' && <RoleManager onToast={push} />}
         </>
       )}
 
@@ -490,26 +509,222 @@ function SalespersonManager({ onToast }) {
   );
 }
 
+/* ---------------------------------- Roles --------------------------------- */
+
+/** Checkbox-as-pill row, shared by the "new role" form and the edit form. */
+function PermissionToggles({ value, onChange, disabled }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      {PERMISSION_OPTIONS.map((o) => {
+        const on = value.includes(o.key);
+        return (
+          <button key={o.key} type="button" disabled={disabled}
+            onClick={() => onChange(on ? value.filter((k) => k !== o.key) : [...value, o.key])}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5,
+              padding: '6px 11px', borderRadius: 999,
+              cursor: disabled ? 'not-allowed' : 'pointer',
+              borderWidth: 1, borderStyle: 'solid',
+              borderColor: on ? C.primary : C.border,
+              background: on ? C.primaryLight : C.surfaceInner,
+              color: on ? C.t1 : C.t3,
+              fontFamily: FONT, fontSize: T.meta, fontWeight: on ? W.bold : W.medium,
+            }}
+            onMouseEnter={(e) => { if (!on) e.currentTarget.style.background = C.hover; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = on ? C.primaryLight : C.surfaceInner; }}
+          >
+            {on && <Check size={13} strokeWidth={2.5} />}
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Roles decide what a dashboard account may see.
+ *
+ * An account with no role assigned stays unrestricted (the original
+ * single-tier behaviour) — a role only ever NARROWS access, never widens it
+ * past what an unassigned account already has.
+ */
+function RoleManager({ onToast }) {
+  const [roles, setRoles] = useState(null);
+  const [error, setError] = useState('');
+  const [name, setName] = useState('');
+  const [newPerms, setNewPerms] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editPerms, setEditPerms] = useState([]);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await apiGet('/api/roles');
+      setRoles(d.roles);
+      setError('');
+    } catch (err) {
+      setError(err.message);
+      setRoles([]);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function add(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      await apiPost('/api/roles', { name, permissions: newPerms });
+      setName(''); setNewPerms([]);
+      await load();
+      onToast('Role added');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startEdit(role) {
+    setEditing(role.id);
+    setEditName(role.name);
+    setEditPerms(role.permissions || []);
+  }
+
+  async function saveEdit(id) {
+    setError('');
+    try {
+      await apiPatch(`/api/roles/${id}`, { name: editName, permissions: editPerms });
+      setEditing(null);
+      await load();
+      onToast('Role updated');
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function remove(role) {
+    setError('');
+    try {
+      await apiFetch(`/api/roles/${role.id}`, { method: 'DELETE' });
+      await load();
+      onToast('Role deleted');
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <Card title="Roles" tag={roles ? String(roles.length) : '…'}>
+      <form onSubmit={add} style={{
+        display: 'grid', gap: 10, marginBottom: 18, paddingBottom: 18,
+        borderBottom: `1px solid ${C.divider}`,
+      }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <Input value={name} onChange={(e) => setName(e.target.value)}
+            placeholder="Role name, e.g. Salesperson" style={{ flex: 1, minWidth: 200 }} />
+          <Button type="submit" disabled={busy || !name}>
+            <Plus size={16} strokeWidth={2.5} /> Add role
+          </Button>
+        </div>
+        <PermissionToggles value={newPerms} onChange={setNewPerms} />
+      </form>
+
+      <ErrorMsg>{error}</ErrorMsg>
+
+      {!roles ? (
+        <div style={{ display: 'grid', placeItems: 'center', padding: 32 }}><Spinner /></div>
+      ) : !roles.length ? (
+        <EmptyState Icon={Lock} title="No roles yet"
+          hint="Create one above, then assign it to an account in the Accounts tab." />
+      ) : (
+        <div style={{ display: 'grid', gap: 12 }}>
+          {roles.map((r) => (
+            <div key={r.id} style={{
+              border: `1px solid ${C.border}`, borderRadius: 11, padding: 12,
+              background: C.surfaceInner,
+            }}>
+              {editing === r.id ? (
+                <div style={{ display: 'grid', gap: 10 }}>
+                  <Input value={editName} onChange={(e) => setEditName(e.target.value)}
+                    autoFocus style={{ maxWidth: 280, height: 34, fontSize: T.meta }} />
+                  <PermissionToggles value={editPerms} onChange={setEditPerms} />
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Button size="sm" onClick={() => saveEdit(r.id)} disabled={!editName.trim()}>Save</Button>
+                    <Button size="sm" variant="subtle" onClick={() => setEditing(null)}>Cancel</Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: FONT, fontSize: T.bodyLg, fontWeight: W.bold, color: C.t1 }}>
+                        {r.name}
+                      </div>
+                      <div style={{ fontFamily: MONO, fontSize: T.micro, color: C.t6 }}>
+                        {fmtNum(r.user_count)} account{r.user_count === 1 ? '' : 's'}
+                      </div>
+                    </div>
+                    <IconButton Icon={Pencil} title={`Edit ${r.name}`} onClick={() => startEdit(r)} />
+                    <IconButton Icon={Ban} danger title={`Delete ${r.name}`} onClick={() => remove(r)} />
+                  </div>
+                  {r.permissions?.length > 0 ? (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {r.permissions.map((p) => (
+                        <span key={p} style={{
+                          fontFamily: MONO, fontSize: T.micro, padding: '3px 9px', borderRadius: 999,
+                          background: C.surfaceMuted, color: C.t4, border: `1px solid ${C.borderSubtle}`,
+                        }}>{PERMISSION_LABELS[p] || p}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontFamily: FONT, fontSize: T.meta, color: C.t7 }}>
+                      No pages granted — accounts with this role see nothing until it's edited.
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <p style={footNote}>
+        An account with no role stays unrestricted. Assigning a role limits it to exactly the
+        pages checked here — set it on the Accounts tab.
+      </p>
+    </Card>
+  );
+}
+
 /* -------------------------- Dashboard accounts --------------------------- */
 
 /**
  * Accounts that can sign in to the dashboard.
  *
  * Unrelated to the salespeople list: salespeople are who a sale is credited to,
- * these are who can read the numbers. Everyone here has the same permissions.
+ * these are who can read the numbers. A role narrows what an account can see;
+ * an account with no role is unrestricted.
  */
 function UserManager({ onToast, currentUser }) {
   const [rows, setRows] = useState(null);
+  const [roles, setRoles] = useState([]);
   const [error, setError] = useState('');
-  const [form, setForm] = useState({ username: '', name: '', password: '' });
+  const [form, setForm] = useState({ username: '', name: '', password: '', role_id: '' });
   const [busy, setBusy] = useState(false);
   const [resetting, setResetting] = useState(null);
   const [newPassword, setNewPassword] = useState('');
+  const [changingRole, setChangingRole] = useState(null);
+  const [roleDraft, setRoleDraft] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const d = await apiGet('/api/users');
-      setRows(d.users);
+      const [u, r] = await Promise.all([apiGet('/api/users'), apiGet('/api/roles')]);
+      setRows(u.users);
+      setRoles(r.roles);
       setError('');
     } catch (err) {
       setError(err.message);
@@ -524,8 +739,8 @@ function UserManager({ onToast, currentUser }) {
     setError('');
     setBusy(true);
     try {
-      await apiPost('/api/users', form);
-      setForm({ username: '', name: '', password: '' });
+      await apiPost('/api/users', { ...form, role_id: form.role_id || null });
+      setForm({ username: '', name: '', password: '', role_id: '' });
       await load();
       onToast('Account created');
     } catch (err) {
@@ -541,12 +756,15 @@ function UserManager({ onToast, currentUser }) {
       await apiPatch(`/api/users/${id}`, patch);
       setResetting(null);
       setNewPassword('');
+      setChangingRole(null);
       await load();
       onToast(message);
     } catch (err) {
       setError(err.message);
     }
   }
+
+  const roleOptions = [{ value: '', label: 'Unrestricted' }, ...roles.map((r) => ({ value: r.id, label: r.name }))];
 
   return (
     <Card title="Dashboard accounts" tag={rows ? String(rows.length) : '…'}>
@@ -561,6 +779,8 @@ function UserManager({ onToast, currentUser }) {
           autoComplete="new-password"
           onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
           style={{ flex: 1, minWidth: 150 }} />
+        <Select value={form.role_id} onChange={(v) => setForm((f) => ({ ...f, role_id: v }))}
+          options={roleOptions} />
         <Button type="submit" disabled={busy || !form.username || !form.password}>
           <UserPlus size={16} strokeWidth={2} /> Add
         </Button>
@@ -589,6 +809,14 @@ function UserManager({ onToast, currentUser }) {
                     <Button type="button" size="sm" variant="subtle"
                       onClick={() => { setResetting(null); setNewPassword(''); }}>Cancel</Button>
                   </form>
+                ) : changingRole === u.id ? (
+                  <form style={{ display: 'flex', flex: 1, flexWrap: 'wrap', gap: 8, alignItems: 'center' }}
+                    onSubmit={(e) => { e.preventDefault(); save(u.id, { role_id: roleDraft || null }, 'Role updated'); }}>
+                    <Select value={roleDraft} onChange={setRoleDraft} options={roleOptions} />
+                    <Button type="submit" size="sm">Save</Button>
+                    <Button type="button" size="sm" variant="subtle"
+                      onClick={() => setChangingRole(null)}>Cancel</Button>
+                  </form>
                 ) : (
                   <>
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -604,10 +832,14 @@ function UserManager({ onToast, currentUser }) {
                                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {u.username}
                         {' · '}
+                        {u.role_name || 'Unrestricted'}
+                        {' · '}
                         {u.last_login_at ? `last in ${fmtDateTime(u.last_login_at)}` : 'never signed in'}
                         {!u.active && ' · disabled'}
                       </div>
                     </div>
+                    <IconButton Icon={ShieldCheck} title={`Change role for ${u.username}`}
+                      onClick={() => { setChangingRole(u.id); setRoleDraft(u.role_id || ''); }} />
                     <IconButton Icon={KeyRound} title={`Change password for ${u.username}`}
                       onClick={() => { setResetting(u.id); setNewPassword(''); }} />
                     <IconButton Icon={u.active ? Ban : CircleCheck}
@@ -623,9 +855,9 @@ function UserManager({ onToast, currentUser }) {
       )}
 
       <p style={footNote}>
-        Everyone here has the same access, including this page. Accounts are never deleted —
-        disabling one ends its sessions immediately. The last active account can&apos;t be
-        disabled, so you can&apos;t lock yourself out.
+        Accounts are never deleted — disabling one ends its sessions immediately. The last
+        active account can&apos;t be disabled, so you can&apos;t lock yourself out. A role
+        limits what an account can see; leave it Unrestricted for full access.
       </p>
     </Card>
   );

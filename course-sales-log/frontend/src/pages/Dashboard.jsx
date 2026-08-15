@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Lock } from 'lucide-react';
 import { apiGet, apiPost } from '../utils/api';
 import Topbar from '../components/Topbar';
 import Sidebar, { NAV_ITEMS, DEFAULT_PAGE } from '../components/Sidebar';
@@ -7,10 +8,11 @@ import Overview from '../components/Overview';
 import SalesTable from '../components/SalesTable';
 import Outstanding from '../components/Outstanding';
 import AdminSettingsPage, { ADMIN_PAGE } from './AdminSettingsPage';
-import { Spinner } from '../components/ui';
+import { Card, EmptyState, Spinner } from '../components/ui';
 import { C, FONT, T, W, LH } from '../constants';
 import { useTheme } from '../theme';
 import { applyChartTheme } from '../utils/chartSetup';
+import { PermissionsProvider } from '../utils/permissions';
 import Login from './Login';
 
 // Only these pages are driven by the filter bar. Settings edits the lists, not
@@ -77,6 +79,16 @@ export default function Dashboard() {
     }
   }, []);
 
+  // A role that does not grant the current page (e.g. the default 'overview'
+  // was never included) lands on the first page it DOES grant, rather than
+  // rendering a page the sidebar itself would never link to.
+  const allowed = user?.permissions ? new Set(user.permissions) : null;
+  useEffect(() => {
+    if (!allowed || page === ADMIN_PAGE || allowed.has(page)) return;
+    const fallback = NAV_ITEMS.find((i) => allowed.has(i.id));
+    if (fallback) navigate(fallback.id);
+  }, [allowed, page, navigate]);
+
   async function logout() {
     try { await apiPost('/api/auth/logout', {}); } catch { /* already gone */ }
     setAuthed(false);
@@ -101,7 +113,12 @@ export default function Dashboard() {
     ? 'Admin Settings'
     : (NAV_ITEMS.find((i) => i.id === page) || NAV_ITEMS[0]).label;
 
+  // Nothing left to redirect to (a role with zero page grants) — say so
+  // rather than silently rendering a page the account cannot see.
+  const denied = allowed !== null && page !== ADMIN_PAGE && !allowed.has(page);
+
   return (
+    <PermissionsProvider value={user?.permissions ?? null}>
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: C.pageBg }}>
       <Topbar user={user} onSignOut={logout}
         onAdminSettings={() => navigate(ADMIN_PAGE)}
@@ -125,17 +142,27 @@ export default function Dashboard() {
               }}>{SUBTITLES[page]}</p>
             </div>
 
-            {FILTERED_PAGES.has(page) && (
-              <FilterBar value={filters} onChange={setFilters} showStatus={STATUS_PAGES.has(page)} />
-            )}
+            {denied ? (
+              <Card>
+                <EmptyState Icon={Lock} title="Not available on this account"
+                  hint="Your role does not grant any page. Ask an admin to update it in Admin Settings > Roles." />
+              </Card>
+            ) : (
+              <>
+                {FILTERED_PAGES.has(page) && (
+                  <FilterBar value={filters} onChange={setFilters} showStatus={STATUS_PAGES.has(page)} />
+                )}
 
-            {page === 'overview' && <Overview filters={filters} />}
-            {page === 'log' && <SalesTable filters={filters} onFilters={setFilters} />}
-            {page === 'outstanding' && <Outstanding filters={filters} />}
-            {page === ADMIN_PAGE && <AdminSettingsPage currentUser={user} />}
+                {page === 'overview' && <Overview filters={filters} />}
+                {page === 'log' && <SalesTable filters={filters} onFilters={setFilters} />}
+                {page === 'outstanding' && <Outstanding filters={filters} />}
+                {page === ADMIN_PAGE && <AdminSettingsPage currentUser={user} />}
+              </>
+            )}
           </div>
         </main>
       </div>
     </div>
+    </PermissionsProvider>
   );
 }

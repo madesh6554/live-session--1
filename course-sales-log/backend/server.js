@@ -29,6 +29,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.use(require('./routes/auth'));
 app.use(require('./routes/users'));
+app.use(require('./routes/roles'));
 app.use(require('./routes/config'));
 app.use(require('./routes/sales'));
 app.use(require('./routes/dashboard'));

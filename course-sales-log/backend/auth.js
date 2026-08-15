@@ -10,8 +10,10 @@ const db = require('./db');
  * needs protecting is /dashboard: revenue totals, every customer's phone and
  * balance, and the Settings editors. Those sit behind a named account.
  *
- * Single role by design: anyone who can sign in gets everything, including the
- * user manager. See 004_users.sql.
+ * Accounts default to unrestricted (role_id null), matching the original
+ * single-tier behaviour from 004_users.sql. Assigning a role (008_roles.sql)
+ * narrows what that account may see, via the page-key vocabulary in
+ * frontend/src/utils/permissions.js.
  */
 
 const COOKIE_NAME = 'csl_session';
@@ -60,9 +62,12 @@ const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', BCRYPT_ROUNDS);
 
 async function verifyCredentials(username, password) {
   const { rows } = await db.query(
-    `select id, username, name, password_hash, active,
-            (extract(epoch from password_changed_at) * 1000000)::bigint as pwd_at
-       from users where lower(username) = lower($1)`,
+    `select u.id, u.username, u.name, u.password_hash, u.active, u.role_id,
+            r.name as role_name, r.permissions,
+            (extract(epoch from u.password_changed_at) * 1000000)::bigint as pwd_at
+       from users u
+       left join roles r on r.id = u.role_id
+      where lower(u.username) = lower($1)`,
     [String(username ?? '').trim()]
   );
   const user = rows[0];
@@ -76,7 +81,13 @@ async function verifyCredentials(username, password) {
   // never tell the caller which of the three it was.
   if (!user || !user.active || !ok) return null;
 
-  return { id: user.id, username: user.username, name: user.name, pwd_at: Number(user.pwd_at) };
+  return {
+    id: user.id, username: user.username, name: user.name, pwd_at: Number(user.pwd_at),
+    role: user.role_id ? { id: user.role_id, name: user.role_name } : null,
+    // No role assigned = unrestricted, same "null is load-bearing" convention
+    // as usePagePermissions() on the frontend.
+    permissions: user.role_id ? user.permissions : null,
+  };
 }
 
 // pwd_at pins the token to the password it was issued under, so a password
@@ -107,9 +118,12 @@ async function userFromToken(token) {
   if (!Number.isInteger(payload?.uid)) return null;
 
   const { rows } = await db.query(
-    `select id, username, name, active,
-            (extract(epoch from password_changed_at) * 1000000)::bigint as pwd_at
-       from users where id = $1`,
+    `select u.id, u.username, u.name, u.active, u.role_id,
+            r.name as role_name, r.permissions,
+            (extract(epoch from u.password_changed_at) * 1000000)::bigint as pwd_at
+       from users u
+       left join roles r on r.id = u.role_id
+      where u.id = $1`,
     [payload.uid]
   );
   const user = rows[0];
@@ -120,7 +134,11 @@ async function userFromToken(token) {
   // those were signed with the old derivable secret.
   if (Number(payload.pwd_at) !== Number(user.pwd_at)) return null;
 
-  return { id: user.id, username: user.username, name: user.name };
+  return {
+    id: user.id, username: user.username, name: user.name,
+    role: user.role_id ? { id: user.role_id, name: user.role_name } : null,
+    permissions: user.role_id ? user.permissions : null,
+  };
 }
 
 const cookieOptions = () => ({
